@@ -1,0 +1,96 @@
+name: Verify left toolbelt
+
+on:
+  push:
+    branches: [left-toolbelt-ci]
+
+jobs:
+  verify:
+    runs-on: xcode-27
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode matching the prebuilt dependencies
+        id: xcode
+        run: |
+          want="$(cat last-xcode-version)"
+          echo "Prebuilt deps were built with:"; echo "$want"
+          echo "Available:"; ls -d /Applications/Xcode*.app
+          for app in /Applications/Xcode*.app; do
+            have="$("$app/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null || true)"
+            if [ "$have" == "$want" ]; then
+              sudo xcode-select -s "$app/Contents/Developer"
+              echo "match=yes" >> "$GITHUB_OUTPUT"
+              echo "Exact match: $app"
+              exit 0
+            fi
+          done
+          # No exact match: use the newest Xcode 27 and rebuild the deps with it.
+          app=""
+          for a in /Applications/Xcode*.app; do
+            v="$("$a/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -1)"
+            echo "$a: $v"
+            case "$v" in "Xcode 27"*) app="$a" ;; esac
+          done
+          if [ -z "$app" ]; then
+            echo "::error::No Xcode 27 on this runner"
+            exit 1
+          fi
+          sudo xcode-select -s "$app/Contents/Developer"
+          echo "match=no" >> "$GITHUB_OUTPUT"
+          echo "::warning::No exact Xcode match; using $app and rebuilding dependencies"
+
+      - name: Rebuild binary dependencies (only when Xcode differs)
+        if: steps.xcode.outputs.match == 'no'
+        run: |
+          git submodule update --init --recursive --depth 1
+          brew install cmake autoconf automake libtool pkg-config || true
+          command -v rustup || (curl -sSf https://sh.rustup.rs | sh -s -- -y)
+          export PATH="$HOME/.cargo/bin:$PATH"
+          make deps
+          xcodebuild -version > last-xcode-version
+
+      - name: Build and run layout tests
+        run: |
+          killall ibtoold 2>/dev/null || true
+          for attempt in 1 2 3; do
+            rm -rf build.log
+            set +e
+            xcodebuild test -project iTerm2.xcodeproj -scheme ModernTests \
+              -only-testing:ModernTests/iTermLayoutCalculatorTest \
+              -parallel-testing-enabled NO -skipPackagePluginValidation \
+              CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+              ARCHS=arm64 ONLY_ACTIVE_ARCH=YES > build.log 2>&1
+            rc=$?
+            set -e
+            grep -E "error:|Test Case .*(passed|failed)|Executed|TEST (SUCCEEDED|FAILED)|\*\* " build.log | tail -80
+            if [ $rc -eq 0 ]; then break; fi
+            if grep -q "CompileAssetCatalogVariant failed\|IBPlatformToolFailureException\|The tool closed the connection" build.log; then
+              killall ibtoold AssetCatalogSimulatorAgent 2>/dev/null || true
+              continue
+            fi
+            tail -150 build.log
+            exit 1
+          done
+          [ $rc -eq 0 ] || exit 1
+
+      - name: Warnings in changed files
+        if: always()
+        run: |
+          files="iTermRootTerminalView.m|iTermToolbeltView.m|iTermToolWrapper.m|iTermLayoutCalculator.m|PseudoTerminal.m|PseudoTerminal\+WindowStyle.m|iTermApplicationDelegate.m|iTermLayoutCalculatorTest.swift"
+          if grep -E "($files):[0-9]+:[0-9]+: warning:" build.log | sort -u | tee warnings.txt | grep -q .; then
+            echo "::error::Warnings in changed files"; exit 1
+          fi
+          echo "No warnings in changed files"
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
