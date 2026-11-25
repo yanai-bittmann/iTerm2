@@ -52,6 +52,12 @@ New Features:
   section for each status, or in a section for
   each working directory. The window’s own tab order doesn’t
   change.
+- With tabs on the left, Toolbelt tools can sit
+  below the tabs instead of at the right edge of
+  the window. Click the arrow in a tool’s title
+  bar, or use the Toolbelt menu (☰), to move it.
+  Drag the line between the tabs and the tools
+  to resize them.
 
 Improvements:
 - Tab groups look quieter in the Minimal theme.
